@@ -3201,14 +3201,23 @@ void admin_session_handler(S* sess, void *_pa, PtrSize_t *pkt) {
 	// Hostgroup Manager. Wait for the plugin lifecycle to finish before running
 	// any command, and do so before taking sql_query_global_mutex, so a plugin
 	// callback that needs it cannot be blocked by a waiting session.
-	proxysql_startup_gate_wait_for_admin([] { return glovars.shutdown != 0; });
-
+	//
 	// add global mutex, see bug #1188. The depth counter records the
 	// per-thread ownership so every re-entrant door of the same mutex
 	// (plugin services reached from this statement) re-enters instead of
 	// double-locking the non-recursive mutex; see
 	// include/proxysql_admin_global_sql_lock.h.
-	proxysql_admin_global_sql_lock(pa->sql_query_global_mutex);
+	//
+	// The gate is re-checked once the mutex is held: with --no-start, a
+	// session queued on the mutex while PROXYSQL START closed the gate must not
+	// run during the plugin lifecycle, or plugin init() (which can need this
+	// mutex while holding the plugin manager) and this statement (which can
+	// need the plugin manager while holding this mutex) deadlock. Such a
+	// session releases the mutex and waits for the gate to reopen.
+	proxysql_startup_gate_lock_for_admin(
+		[pa] { proxysql_admin_global_sql_lock(pa->sql_query_global_mutex); },
+		[pa] { proxysql_admin_global_sql_unlock(pa->sql_query_global_mutex); },
+		[] { return glovars.shutdown != 0; });
 
 		if (strcasestr(query_no_space, "INFORMATION_SCHEMA.TABLES") != nullptr) {
 			const char* info_table_name = "SELECT table_name FROM INFORMATION_SCHEMA.TABLES WHERE table_schema = DATABASE() AND table_name = '";
